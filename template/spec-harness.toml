@@ -1,0 +1,32 @@
+# Configuración del harness de specs. Lo que no aparezca aquí usa los defaults de
+# .claude/spec_harness/config.py.
+
+[paths]
+specs_dir = "specs"
+steering_dir = ".claude/steering"
+
+[tests]
+# Suite completa: la corre `cli.py done` antes de marcar una tarea.
+full_cmd = "python -m pytest -q"
+# Tests relacionados: los corre el hook al editar un .py. {tests} = rutas encontradas.
+related_cmd = "python -m pytest -q -x {tests}"
+# Dónde buscar el test de un archivo editado. {stem} = nombre sin extensión, {dir} = su carpeta.
+related_patterns = ["tests/test_{stem}.py", "{dir}/test_{stem}.py", "{dir}/tests/test_{stem}.py"]
+timeout = 300
+
+[lint]
+# {file} = archivo editado. Si la herramienta no está instalada, se omite sin bloquear.
+python_cmd = "ruff check {file}"
+sql_cmd = "sqlfluff lint {file} --dialect redshift --nocolor"
+timeout = 60
+
+[approval]
+# Respuestas del usuario que aprueban la fase pendiente (mensaje exacto, opcionalmente + feature).
+phrases = ["aprobado", "aprobada", "apruebo", "approved", "lgtm"]
+
+[stop]
+# Veces que el hook Stop impide cerrar el turno con una tarea en curso antes de rendirse.
+max_retries = 3
+
+[steering]
+max_chars = 30000

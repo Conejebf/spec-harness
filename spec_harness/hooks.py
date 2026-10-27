@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from spec_harness import config, runner, tasks
+from spec_harness import config, flow, runner, tasks
 from spec_harness.cli import describe
 from spec_harness.state import (
     FILES,
@@ -126,8 +126,10 @@ def _only_checkboxes(tool: str, tool_input: dict) -> bool:
     )
 
 
-# --- PostToolUse: validar specs; lint + tests del archivo editado ----------------------
+# --- PostToolUse: validar specs; lint + tests; registrar la opción elegida -----------
 def posttool(payload: dict, root: Path, cfg: dict) -> dict | None:
+    if payload.get("tool_name") == "AskUserQuestion":
+        return _after_question(payload, root, cfg)
     if payload.get("tool_name") not in EDIT_TOOLS:
         return None
     path = _target(payload, root)
@@ -155,7 +157,7 @@ def _after_spec_edit(feat: Feature, phase: str) -> dict:
     note = f" Ojo: {', '.join(stale)} quedaron desactualizados y habrá que reaprobarlos." if stale else ""
     return _context("PostToolUse", (
         f"{phase}.md de '{feat.name}' es válido.{note} Cuando termines de editarlo, DETENTE: resume el "
-        "documento y pide aprobación al usuario (responde 'aprobado' para aprobar). No avances de fase."
+        f"documento y {flow.approval_hint(feat.name, phase)} No avances de fase por tu cuenta."
     ))
 
 
@@ -168,52 +170,57 @@ def _after_code_edit(path: Path, root: Path, cfg: dict) -> dict | None:
     return _block(f"{path.name}: corrige antes de seguir.\n\n{report}")
 
 
-# --- UserPromptSubmit: la aprobación sólo la puede dar el usuario ----------------------
+def _after_question(payload: dict, root: Path, cfg: dict) -> dict | None:
+    feats = find_features(config.specs_dir(root, cfg))
+    hint = flow.question_text(payload)
+    notes = [flow.apply(flow.classify(a, cfg["approval"]["phrases"]), feats, hint) for a in flow.extract_answers(payload)]
+    text = " ".join(n for n in notes if n)
+    return _context("PostToolUse", text) if text else None
+
+
+# --- UserPromptSubmit: respaldo escrito de las mismas decisiones ----------------------
+MAX_DECISION_WORDS = 8
+
+
 def prompt(payload: dict, root: Path, cfg: dict) -> dict | None:
-    text = (payload.get("prompt") or "").strip().lower()
-    phrases = "|".join(re.escape(p.lower()) for p in cfg["approval"]["phrases"])
-    match = re.fullmatch(rf"(?:{phrases})(?:\s+([a-z0-9-]+))?[\s.!]*", text)
-    if not match:
+    text = (payload.get("prompt") or "").strip()
+    if not text or text.startswith("/") or len(text.split()) > MAX_DECISION_WORDS:
         return None
-    waiting = [f for f in find_features(config.specs_dir(root, cfg)) if f.load()["awaiting"]]
-    if match.group(1):
-        waiting = [f for f in waiting if f.name == match.group(1)]
-    if len(waiting) != 1:
-        names = ", ".join(f.name for f in waiting) or "ninguna"
-        return _context("UserPromptSubmit", f"El usuario quiso aprobar, pero hay {len(waiting)} specs esperando "
-                        f"aprobación ({names}). Pídele que responda 'aprobado <feature>'.")
-    return _approve(waiting[0])
+    choice = flow.classify(text, cfg["approval"]["phrases"])
+    if choice.empty or ("pero" in text.lower().split()):
+        return None
+    note = flow.apply(choice, find_features(config.specs_dir(root, cfg)), text)
+    return _context("UserPromptSubmit", note) if note else None
 
 
-def _approve(feat: Feature) -> dict:
-    phase = feat.load()["awaiting"]
-    problems = [p for p in [feat.prerequisite_error(phase)] if p] or feat.validate(phase)
-    if problems:
-        return _context("UserPromptSubmit", f"No se aprobó {phase}.md de '{feat.name}': " + "; ".join(problems))
-    feat.approve(phase)
-    nxt = {"requirements": "/spec-design", "design": "/spec-tasks", "tasks": "/spec-run"}[phase]
-    return _context("UserPromptSubmit", (
-        f"[spec-harness] El usuario APROBÓ {phase}.md de '{feat.name}' (quedó registrado). Confírmalo en una "
-        f"línea e indícale que el siguiente paso es `{nxt} {feat.name}`. No lo empieces por tu cuenta."
-    ))
-
-
-# --- Stop: una tarea en curso no puede quedar a medias ---------------------------------
+# --- Stop: ni tareas a medias, ni detenerse en modo automático ------------------------
 def stop(payload: dict, root: Path, cfg: dict) -> dict | None:
     for feat in find_features(config.specs_dir(root, cfg)):
         data = feat.load()
-        if not data["current_task"]:
+        reason = _stop_reason(feat, data)
+        if not reason:
             continue
         if data["stop_blocks"] >= cfg["stop"]["max_retries"]:
-            return {"systemMessage": f"spec-harness: la tarea {data['current_task']} de '{feat.name}' sigue "
-                                     "en curso sin cerrar (se alcanzó el tope de reintentos)."}
+            return {"systemMessage": f"spec-harness: '{feat.name}' quedó a medias (se alcanzó el tope de "
+                                     "reintentos del hook Stop). Revisa con /spec-status."}
         data["stop_blocks"] += 1
         feat.save(data)
-        return _block(
+        return _block(reason)
+    return None
+
+
+def _stop_reason(feat: Feature, data: dict) -> str | None:
+    cli = "python .claude/spec_harness/cli.py"
+    if data["current_task"]:
+        return (
             f"La tarea {data['current_task']} de '{feat.name}' sigue en curso. Termínala y corre "
-            f"`python .claude/spec_harness/cli.py done {feat.name}` (corre los tests y marca tasks.md). "
-            f"Si no puedes terminarla o necesitas al usuario, corre "
-            f"`python .claude/spec_harness/cli.py pause {feat.name} \"<motivo>\"` y explícale por qué."
+            f"`{cli} done {feat.name}` (corre los tests y marca tasks.md). Si te atoraste o necesitas al "
+            f"usuario, corre `{cli} pause {feat.name} \"<motivo>\"` y pregúntale con las opciones que indica."
+        )
+    if data["run_mode"] == "auto" and not data["paused"] and tasks.next_pending(feat.read("tasks") or ""):
+        return (
+            f"Modo automático activo en '{feat.name}' y quedan tareas: sigue con `{cli} start {feat.name}`. "
+            f"Solo si te atoras, corre `{cli} pause {feat.name} \"<motivo>\"`."
         )
     return None
 

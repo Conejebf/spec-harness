@@ -22,27 +22,43 @@ Qué deja en el proyecto:
 
 | Ruta | Qué es |
 |---|---|
-| `.claude/spec_harness/` | Código (CLI + hooks), solo librería estándar de Python 3.11+ |
-| `.claude/skills/spec-*/` | Los slash commands y sus plantillas |
+| `.claude/spec_harness/` | Código (CLI + hooks) e instrucciones de cada fase (`fases/`); solo librería estándar de Python 3.11+ |
+| `.claude/skills/spec*/` | Los slash commands (atajos a las fases) |
 | `.claude/steering/{product,tech,structure}.md` | Contexto permanente (plantillas si no existían) |
 | `.claude/spec-harness.toml` | Config: comandos de tests y lint, frases de aprobación |
 | `.claude/settings.json` | Hooks, fusionados con los que ya tengas |
 | `CLAUDE.md` | Bloque `<!-- spec-harness:start/end -->` con las reglas del flujo |
 | `specs/<feature>/` | requirements.md, design.md, tasks.md y `.state.json` (se crean al usarlo) |
 
-## Flujo
+## Flujo: escribes un comando, lo demás es con clics
 
 ```
-/spec-steering                         (una vez) redacta product/tech/structure.md
-/spec-requirements <feature> <qué>     → requirements.md  → tú: "aprobado"
-/spec-design <feature>                 → design.md        → tú: "aprobado"
-/spec-tasks <feature>                  → tasks.md         → tú: "aprobado"
-/spec-run <feature> [id]               → implementa UNA tarea, corre tests, la marca, se detiene
-/spec-run <feature>                    → la siguiente… (tú revisas entre cada una)
-/spec-status [feature]                 → dónde va cada spec
+/spec-steering                       (una vez) redacta product/tech/structure.md
+/spec <feature> <qué se quiere>      empieza una feature, o retoma la que ya existe donde se quedó
 ```
 
-### 1. Requisitos — `/spec-requirements`
+Al terminar cada fase, Claude te pregunta con opciones y **tú haces clic**; no tienes que escribir el
+siguiente comando:
+
+| Al terminar… | Opciones |
+|---|---|
+| Requisitos | **Aprobar y seguir con el diseño** · Aprobar y parar aquí · Pedir cambios |
+| Diseño | **Aprobar y seguir con las tareas** · Aprobar y parar aquí · Pedir cambios |
+| Tareas | **Aprobar y correr una tarea** · **Aprobar y correr todas (solo pregunto si me atoro)** · Aprobar y parar aquí · Pedir cambios |
+| Cada tarea (modo una) | **Correr la siguiente tarea** · **Correr todas las restantes** · Parar aquí |
+| Si se atora | Reintentar la tarea · Reintentar y seguir con todas · Ajustar la spec · Parar aquí |
+
+- **Correr una tarea:** hace la siguiente, corre los tests, la marca y te vuelve a preguntar.
+- **Correr todas:** las hace una tras otra **en orden**, sin preguntar entre tareas. Solo se detiene si
+  se atora (tests que no pasan tras 3 intentos, diseño insuficiente, decisión de negocio): pausa, sale
+  del modo automático y te pregunta con opciones. Un hook no le deja terminar el turno mientras queden
+  tareas en este modo.
+- **Orden:** `start` solo acepta la siguiente tarea pendiente; nunca se brinca ni reordena.
+
+Los comandos por fase siguen existiendo si quieres entrar directo: `/spec-requirements`,
+`/spec-design`, `/spec-tasks`, `/spec-run`, `/spec-status`.
+
+### 1. Requisitos
 Historias de usuario (`Como <rol>, quiero <capacidad>, para <beneficio>`) y criterios de aceptación
 en **EARS en español**. El criterio N del requisito R se identifica como `R.N`.
 
@@ -57,42 +73,43 @@ en **EARS en español**. El criterio N del requisito R se identifica como `R.N`.
 El sujeto puede ser concreto (`EL REPORTE DEBERÁ`, `LA API DEBERÁ`). Un criterio fuera de EARS no
 pasa la validación.
 
-### 2. Diseño — `/spec-design`
+### 2. Diseño
 Secciones obligatorias: Resumen, Arquitectura, Componentes e interfaces, Modelos de datos, Manejo de
 errores, Estrategia de pruebas. Cada componente cita los criterios que cubre (`cubre 1.2`).
 
-### 3. Tareas — `/spec-tasks`
+### 3. Tareas
 Checklist anidado. Las hojas son las tareas ejecutables y cada una lleva `_Requisitos: 1.1, 2.3_`.
 Se valida que cada referencia exista y que **todos** los criterios queden cubiertos por alguna tarea.
 
-### 4. Ejecución — `/spec-run`
-Toma la siguiente tarea pendiente (o la que indiques), escribe primero la prueba, implementa, cierra
-con `cli.py done` (corre la suite completa y solo si pasa marca `[x]`, en cascada al grupo) y se
-detiene a reportar. No hace commit ni avanza sola a la siguiente tarea.
+### 4. Ejecución
+Por tarea: escribe primero la prueba, implementa, cierra con `cli.py done` (corre la suite completa y
+solo si pasa marca `[x]`, en cascada al grupo). Nunca hace commit.
 
-## Aprobaciones
+## Aprobaciones y autorizaciones
 
-Al terminar una fase, Claude se detiene. **Apruebas respondiendo exactamente `aprobado`** (o
-`aprobada`, `apruebo`, `lgtm`; con varias specs pendientes, `aprobado <feature>`). Un mensaje como
-"aprobado pero cambia X" **no** aprueba: es una petición de cambios.
+Tu clic es la autorización. Un hook (`PostToolUse` sobre `AskUserQuestion`) lee la opción que
+elegiste y la registra en `specs/<feature>/.state.json`. Claude no tiene otra vía:
 
-- La aprobación la registra el hook `UserPromptSubmit` a partir de **tu** mensaje. Claude no puede
-  aprobar: el comando `approve` y cualquier escritura a `.state.json` están bloqueados para él.
+- No puede aprobar: el comando `approve` y cualquier escritura a `.state.json` están bloqueados para él.
+- No puede correr tareas sin tu clic: `start` responde "Sin autorización" si no elegiste correr una o
+  todas. "Correr una" autoriza exactamente una tarea; "correr todas" activa el modo automático hasta
+  terminar o hasta que se atore.
+- **Respaldo escrito:** también puedes responder con texto corto: `aprobado` (aprueba y sigue),
+  `correr una`, `correr todas`. Un mensaje como "aprobado pero cambia X" **no** aprueba.
 - Cada aprobación guarda el hash del documento y del anterior en la cadena. Si editas un
   `requirements.md` ya aprobado, `design` y `tasks` quedan **desactualizados** solos y hay que
   reaprobarlos. Marcar casillas en `tasks.md` no invalida nada.
-- También puedes aprobar desde tu terminal:
-  `python .claude/spec_harness/cli.py approve <feature> <requirements|design|tasks>`.
+- Desde tu terminal: `python .claude/spec_harness/cli.py approve <feature> <requirements|design|tasks>`.
 
 ## Hooks
 
 | Evento | Qué hace |
 |---|---|
 | `SessionStart` | Inyecta `.claude/steering/*.md` (product, tech y structure primero) y el estado de las specs |
-| `UserPromptSubmit` | Registra tu aprobación cuando respondes `aprobado` |
+| `UserPromptSubmit` | Respaldo escrito: registra `aprobado`, `correr una`, `correr todas` |
 | `PreToolUse` | Compuerta de fase (no hay design sin requirements aprobado, ni tasks sin design); bloquea autoaprobarse, tocar `.state.json` y marcar casillas a mano |
-| `PostToolUse` | Spec editada → la valida (EARS, secciones, cobertura). Código editado → lint del archivo (ruff / sqlfluff) y sus tests relacionados (`tests/test_<nombre>.py`); si fallan, Claude debe corregir |
-| `Stop` | No deja cerrar el turno con una tarea en curso: hay que terminarla (`done`) o pausarla (`pause`). Se rinde tras `max_retries` y te avisa |
+| `PostToolUse` | Clic en una opción → registra aprobación / autorización y le dice a Claude qué sigue. Spec editada → la valida (EARS, secciones, cobertura). Código editado → lint del archivo (ruff / sqlfluff) y sus tests relacionados (`tests/test_<nombre>.py`) |
+| `Stop` | No deja cerrar el turno con una tarea en curso ni, en modo "correr todas", mientras queden tareas. Se rinde tras `max_retries` y te avisa |
 
 Lint o tests que no estén instalados se omiten sin bloquear.
 
@@ -101,7 +118,7 @@ Lint o tests que no estén instalados se omiten sin bloquear.
 ```bash
 python .claude/spec_harness/cli.py status [feature]
 python .claude/spec_harness/cli.py check <feature> <fase>
-python .claude/spec_harness/cli.py start <feature> [id]      # lo usa /spec-run
+python .claude/spec_harness/cli.py start <feature>           # siguiente tarea; requiere tu autorización
 python .claude/spec_harness/cli.py done <feature>            # tests + marcar tasks.md
 python .claude/spec_harness/cli.py pause <feature> "<motivo>"
 python .claude/spec_harness/cli.py approve <feature> <fase>  # solo tú
@@ -126,6 +143,6 @@ phrases = ["aprobado", "aprobada", "apruebo", "approved", "lgtm"]
 ## Desarrollo
 
 ```bash
-python -m pytest -q     # 25 tests: validadores, estado, CLI, los 5 hooks e instalador
+python -m pytest -q     # 34 tests: validadores, decisiones, estado, CLI, hooks e instalador
 ruff check .
 ```

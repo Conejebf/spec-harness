@@ -1,6 +1,6 @@
 from conftest import DESIGN, REQUIREMENTS, TASKS
 
-from spec_harness import design, requirements, tasks
+from spec_harness import design, flow, requirements, tasks
 
 CRITERIA = {"1.1", "1.2", "2.1"}
 
@@ -63,3 +63,19 @@ def test_mark_done_cascades_to_parent():
     assert tasks.next_pending(text) is None
     assert tasks.progress(text) == (2, 2)
     assert tasks.normalize(text) == tasks.normalize(TASKS)
+
+
+def test_classify_choices():
+    phrases = ["aprobado"]
+    c = flow.classify("Aprobar y seguir con el diseño", phrases)
+    assert c.approve and c.proceed and c.run is None
+    c = flow.classify("Aprobar y parar aquí", phrases)
+    assert c.approve and not c.proceed
+    c = flow.classify("Aprobar y correr todas (solo pregunto si me atoro)", phrases)
+    assert c.approve and c.run == "all"
+    assert flow.classify("Correr la siguiente tarea", phrases).run == "one"
+    assert flow.classify("Reintentar y seguir con todas", phrases).run == "all"
+    assert flow.classify("Reintentar la tarea", phrases).run == "one"
+    assert flow.classify("Aprobado.", phrases).proceed
+    for label in ("Pedir cambios", "Parar aquí", "Ajustar la spec"):
+        assert flow.classify(label, phrases).empty

@@ -60,9 +60,10 @@ class Feature:
         data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
         data.setdefault("feature", self.name)
         data.setdefault("approvals", {})
-        for key in ("awaiting", "current_task", "last_done", "paused"):
+        for key in ("awaiting", "current_task", "last_done", "paused", "run_mode"):
             data.setdefault(key, None)
         data.setdefault("stop_blocks", 0)
+        data.setdefault("run_credits", 0)
         return data
 
     def save(self, data: dict) -> None:

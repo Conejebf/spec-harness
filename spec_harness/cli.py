@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from spec_harness import config, runner, tasks
+from spec_harness import config, flow, runner, tasks
 from spec_harness.state import (
     FEATURE_NAME,
     PHASES,
@@ -65,6 +65,10 @@ def describe(feat: Feature) -> str:
         lines.append(f"  - tarea en curso: {data['current_task']}")
     if data["paused"]:
         lines.append(f"  - pausada: {data['paused']['task']} ({data['paused']['reason']})")
+    if data["run_mode"] == "auto":
+        lines.append("  - modo automático: corre todas las tareas en orden")
+    elif data["run_credits"]:
+        lines.append(f"  - autorizada para correr {data['run_credits']} tarea(s)")
     return "\n".join(lines)
 
 
@@ -107,13 +111,21 @@ def cmd_start(root: Path, cfg: dict, args) -> int:
         print(f"No se puede ejecutar: {blocker}")
         return 1
     data = feat.load()
-    if data["current_task"] and data["current_task"] != (args.task or data["current_task"]):
-        print(f"Ya hay una tarea en curso ({data['current_task']}). Termínala con 'done' o 'pause'.")
-        return 1
-    task = _pick_task(feat.read("tasks") or "", args.task or data["current_task"])
+    if data["current_task"]:
+        if args.task not in (None, data["current_task"]):
+            print(f"Ya hay una tarea en curso ({data['current_task']}). Termínala con 'done' o 'pause'.")
+            return 1
+        print(_task_brief(feat, tasks.parse(feat.read("tasks") or "")[data["current_task"]]))
+        return 0
+    task = _pick_task(feat.read("tasks") or "", args.task)
     if isinstance(task, str):
         print(task)
         return 1
+    if data["run_mode"] != "auto" and data["run_credits"] < 1:
+        print(f"Sin autorización para correr tareas de '{feat.name}'. {flow.OPTIONS_HINT}")
+        return 1
+    if data["run_mode"] != "auto":
+        data["run_credits"] -= 1
     data.update(current_task=task.task_id, paused=None, stop_blocks=0)
     feat.save(data)
     print(_task_brief(feat, task))
@@ -121,16 +133,13 @@ def cmd_start(root: Path, cfg: dict, args) -> int:
 
 
 def _pick_task(text: str, task_id: str | None):
-    parsed = tasks.parse(text)
-    if task_id is None:
-        task = tasks.next_pending(text)
-        return task or "Todas las tareas están hechas."
-    task = parsed.get(task_id)
+    """Siempre la siguiente pendiente en orden: pedir otra es un error."""
+    task = tasks.next_pending(text)
     if task is None:
-        return f"No existe la tarea {task_id}."
-    if not task.is_leaf:
-        return f"La tarea {task_id} tiene subtareas; ejecuta una subtarea ({', '.join(task.children)})."
-    return f"La tarea {task_id} ya está hecha." if task.done else task
+        return "Todas las tareas están hechas."
+    if task_id not in (None, task.task_id):
+        return f"Las tareas van en orden: la siguiente es {task.task_id} ({task.title}), no {task_id}."
+    return task
 
 
 def _task_brief(feat: Feature, task: tasks.Task) -> str:
@@ -159,14 +168,21 @@ def cmd_done(root: Path, cfg: dict, args) -> int:
         return 1
     path = feat.doc_path("tasks")
     path.write_text(tasks.mark_done(path.read_text(encoding="utf-8"), task_id), encoding="utf-8")
-    data.update(current_task=None, last_done=task_id, stop_blocks=0)
-    feat.save(data)
     text = path.read_text(encoding="utf-8")
-    done, total = tasks.progress(text)
     nxt = tasks.next_pending(text)
+    data.update(current_task=None, last_done=task_id, stop_blocks=0)
+    if nxt is None:
+        data["run_mode"] = None
+    feat.save(data)
+    done, total = tasks.progress(text)
     summary = (result.tail().splitlines() or ["ok"])[-1]
     print(f"Tarea {task_id} marcada como hecha ({done}/{total}). Tests: {summary}")
-    print(f"Siguiente: {nxt.task_id} {nxt.title}" if nxt else "No quedan tareas pendientes.")
+    if nxt is None:
+        print("No quedan tareas pendientes. Reporta el resultado final y termina.")
+    elif data["run_mode"] == "auto":
+        print(f"Modo automático: sigue con la siguiente ({nxt.task_id} {nxt.title}) sin preguntar.")
+    else:
+        print(f"Siguiente: {nxt.task_id} {nxt.title}. Reporta lo hecho y {flow.OPTIONS_HINT}")
     return 0
 
 
@@ -176,9 +192,12 @@ def cmd_pause(root: Path, cfg: dict, args) -> int:
     if not data["current_task"]:
         print("No hay tarea en curso.")
         return 1
-    data.update(paused={"task": data["current_task"], "reason": args.reason}, current_task=None, stop_blocks=0)
+    data.update(paused={"task": data["current_task"], "reason": args.reason}, current_task=None,
+                stop_blocks=0, run_mode=None, run_credits=0)
     feat.save(data)
-    print(f"Tarea {data['paused']['task']} pausada: {args.reason}")
+    print(f"Tarea {data['paused']['task']} pausada: {args.reason}. Se desactivó el modo automático.")
+    print("Explica al usuario dónde te atoraste y pregunta con AskUserQuestion ofreciendo: "
+          "'Reintentar la tarea', 'Reintentar y seguir con todas', 'Ajustar la spec' y 'Parar aquí'.")
     return 0
 
 
